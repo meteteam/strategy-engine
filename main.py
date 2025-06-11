@@ -52,11 +52,12 @@ async def webhook_listener(request: Request):
         state = symbol_state[symbol]
         is_new_band = matched_band != state["current_band"]
 
-        if is_new_band:
-            profit = 0.2 * state["position_size"] if state["current_band"] else 0
-            state["realized_profit"] += profit
-            state["position_size"] += profit
-            state["current_band"] = matched_band
+       if is_new_band:
+    # Gerçek kar/zararı al
+    profit = state.get("realized_profit", 0)
+    state["position_size"] += profit
+    state["realized_profit"] = 0
+    state["current_band"] = matched_band
 
             orders = split_position(matched_band["levels"], state["position_size"])
 

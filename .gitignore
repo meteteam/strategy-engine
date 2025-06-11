@@ -1,0 +1,12 @@
+# Python derleme çıktıları
+pycache/
+*.pyc
+*.pyo
+*.pyd
+
+# Ortam dosyası (API KEY saklanıyor!)
+.env
+
+# IDE dosyaları
+.vscode/
+.DS_Store

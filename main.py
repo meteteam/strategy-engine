@@ -1,90 +1,107 @@
-from fastapi import FastAPI, Request
 import json
-from typing import Optional
+from fastapi import FastAPI, Request
+from bybit import place_limit_order
 import uvicorn
 
 app = FastAPI()
 
-# Her coin için bağımsız pozisyon yönetimi
-symbol_state = {}  # örnek: BTCUSDT: {position_size, realized_profit, current_band}
-
-# Bantları yükle
+# === Bant yapılarını yükle ===
 with open("bands_config.json", "r") as f:
-    band_list = json.load(f)
+    bands = json.load(f)
 
-def find_band(price: float, direction: str) -> Optional[dict]:
-    """
-    Belirli bir fiyat ve yön için geçerli bandı bulur.
-    """
-    for band in band_list:
-        if band["direction"] == direction and min(band["from"], band["to"]) <= price <= max(band["from"], band["to"]):
-            return band
-    return None
+# === Symbol'e özel işlem geçmişi tut ===
+symbol_state = {}
 
-def split_position(levels: list[float], position_size: float) -> list[dict]:
+def split_position(levels: list[float], position_size: float, close_price: float, direction: str):
     """
-    Pozisyonu ara seviyelere eşit şekilde böler.
+    Ara seviyelere göre pozisyonu 2'ye böl: TP ve geri çekilme emirleri
     """
-    per_level = round(position_size / len(levels), 8)
-    return [{"price": lvl, "amount": per_level} for lvl in levels]
+    sorted_levels = sorted(levels) if direction == "long" else sorted(levels, reverse=True)
+
+    tp_levels = [lvl for lvl in sorted_levels if (lvl > close_price if direction == "long" else lvl < close_price)]
+    retrace_levels = [lvl for lvl in sorted_levels if (lvl <= close_price if direction == "long" else lvl >= close_price)]
+
+    total_levels = len(tp_levels) + len(retrace_levels)
+    if total_levels == 0:
+        return []
+
+    tp_ratio = len(tp_levels) / total_levels
+    retrace_ratio = len(retrace_levels) / total_levels
+
+    tp_amount = position_size * tp_ratio
+    retrace_amount = position_size * retrace_ratio
+
+    orders = []
+
+    for lvl in tp_levels:
+        orders.append({
+            "side": "Sell" if direction == "long" else "Buy",
+            "price": lvl,
+            "amount": round(tp_amount / len(tp_levels), 4)
+        })
+
+    for lvl in retrace_levels:
+        orders.append({
+            "side": "Buy" if direction == "long" else "Sell",
+            "price": lvl,
+            "amount": round(retrace_amount / len(retrace_levels), 4)
+        })
+
+    return orders
+
 
 @app.post("/webhook")
 async def webhook_listener(request: Request):
-    try:
-        data = await request.json()
-        symbol = data.get("symbol")
-        direction = data.get("direction")  # "long" or "short"
-        price = float(data.get("triggerPrice"))
+    data = await request.json()
 
-        matched_band = find_band(price, direction)
-        if not matched_band:
-            print(f"[{symbol}] Uygun bant bulunamadı: {price} - {direction}")
-            return {"status": "no_band_match"}
+    symbol = data.get("symbol")
+    close_price = float(data.get("close"))
+    direction = data.get("direction")
 
-        # Her sembol için state oluştur
-        if symbol not in symbol_state:
-            symbol_state[symbol] = {
-                "position_size": 1.0,
-                "realized_profit": 0.0,
-                "current_band": None
-            }
+    matched_band = next(
+        (b for b in bands if b["direction"] == direction and b["from"] < close_price < b["to"]),
+        None
+    )
 
-        state = symbol_state[symbol]
-        is_new_band = matched_band != state["current_band"]
+    if not matched_band:
+        return {"status": "no_band_match"}
 
-       if is_new_band:
-    # Gerçek kar/zararı al
-    profit = state.get("realized_profit", 0)
-    state["position_size"] += profit
-    state["realized_profit"] = 0
-    state["current_band"] = matched_band
+    state = symbol_state.get(symbol, {
+        "current_band": None,
+        "position_size": 1.0,  # İlk işlem 1 BTC gibi düşünebilirsin
+        "profit": 0.0
+    })
 
-            orders = split_position(matched_band["levels"], state["position_size"])
+    is_new_band = matched_band != state["current_band"]
 
-            print(f"--- [{symbol}] Yeni Banda Geçiş ---")
-            print(f"Fiyat: {price} → Bant: {matched_band['from']} - {matched_band['to']} ({direction})")
-            print(f"Yeni pozisyon: {state['position_size']:.4f} ({profit:.4f} kar eklendi)")
-            for o in orders:
-                print(f"  → TP: {o['price']} | Miktar: {o['amount']}")
+    # Eğer yeni banda geçildiyse karı dahil et
+    if is_new_band:
+        state["profit"] += 0  # Kar hesabı dinamik değilse sabit bırak
+        state["position_size"] += state["profit"]
+        state["current_band"] = matched_band
 
-            return {
-                "status": "new_band",
-                "symbol": symbol,
-                "position_size": state["position_size"],
-                "used_profit": profit,
-                "orders": orders
-            }
+    # Emirleri ara seviyelere göre böl
+    orders = split_position(matched_band["levels"], state["position_size"], close_price, direction)
 
-        else:
-            orders = split_position(matched_band["levels"], state["position_size"])
+    for o in orders:
+        print(f"Emir: {o['side']} | Fiyat: {o['price']} | Miktar: {o['amount']}")
+        place_limit_order(
+            symbol=symbol,
+            side=o["side"],
+            price=o["price"],
+            qty=o["amount"]
+        )
 
-            print(f"[{symbol}] Aynı bantta kalındı → {matched_band['from']} - {matched_band['to']}")
-            return {
-                "status": "same_band",
-                "symbol": symbol,
-                "position_size": state["position_size"],
-                "orders": orders
-            }
+    symbol_state[symbol] = state
 
-    except Exception as e:
-        return {"error": str(e)}
+    return {
+        "status": "executed",
+        "symbol": symbol,
+        "position_size": state["position_size"],
+        "orders": orders
+    }
+
+
+# === Uvicorn sunucusunu başlat (Render için) ===
+if name == "main":
+    uvicorn.run("main:app", host="0.0.0.0", port=10000)

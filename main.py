@@ -13,6 +13,8 @@ class WebhookMessage(BaseModel):
 with open("bands_config.json", "r") as f:
     bands = json.load(f)
 
+print("✅ Yüklenen bantlar:", bands)
+
 # === Symbol -> geçilen bantları tutmak için durum hafızası ===
 symbol_state = {}
 
@@ -47,9 +49,12 @@ class WebhookPayload(BaseModel):
 
 # === Webhook dinleyici ===
 @app.post("/webhook")
-async def webhook_listener(data: WebhookPayload):
+async def webhook_listener(data: WebhookMessage):
+    print("✅ Yüklenen bantlar:", bands)  # 🔥 tam buraya
     message = data.message
     print("📩 Gelen mesaj:", message)
+
+    # ...devam eden logic
 
     # Yönü belirle (LONG / SHORT)
     direction = "long" if "LONG" in message else "short"

@@ -6,6 +6,9 @@ import uvicorn
 
 app = FastAPI()
 
+class WebhookMessage(BaseModel):
+    message: str
+
 # === Bant yapılarını yükle ===
 with open("bands_config.json", "r") as f:
     bands = json.load(f)

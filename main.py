@@ -1,3 +1,5 @@
+# main.py
+
 import json
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -13,6 +15,7 @@ class WebhookMessage(BaseModel):
 # === Bant yapılarını yükle ===
 with open("bands_config.json", "r") as f:
     bands = json.load(f)
+
 print("✅ Yüklenen bantlar:", bands)
 
 # === Symbol -> geçilen bantları tutmak için durum hafızası ===
@@ -21,7 +24,6 @@ symbol_state = {}
 # === Pozisyonu seviyelere böl ===
 def split_position(levels: list[float], position_size: float, close_price: float, direction: str):
     sorted_levels = sorted(levels) if direction == "long" else sorted(levels, reverse=True)
-
     tp_levels = [lvl for lvl in sorted_levels if (lvl > close_price if direction == "long" else lvl < close_price)]
     retrace_levels = [lvl for lvl in sorted_levels if (lvl <= close_price if direction == "long" else lvl >= close_price)]
 
@@ -49,15 +51,12 @@ async def webhook_listener(data: WebhookMessage):
     message = data.message
     print("📩 Gelen mesaj:", message)
 
-    # Yönü belirle (LONG / SHORT)
     direction = "long" if "LONG" in message else "short"
 
     try:
-        # Fiyatı ve sembolü ayıkla
         level_part = message.split("Fiyat")[1].split("seviyesini")[0].strip()
         close_price = float(level_part)
-
-        symbol = message.split("(")[1].split(":")[1].split(" ")[0]  # Örn: BYBIT:AAVEUSDT
+        symbol = message.split("(")[1].split(":")[1].split(" ")[0]  # Örn: BYBIT:AAVEUSDT.P
     except Exception as e:
         return {"error": "Mesaj formatı çözümlemedi", "detail": str(e)}
 
@@ -65,8 +64,8 @@ async def webhook_listener(data: WebhookMessage):
 
     # İlgili bant aralığını bul
     band = next((
-        b for b in bands
-        if b["direction"] == direction and (
+        b for b in bands if
+        b["direction"] == direction and (
             (b["from"] <= close_price <= b["to"]) if b["from"] < b["to"]
             else (b["to"] <= close_price <= b["from"])
         )
@@ -75,10 +74,8 @@ async def webhook_listener(data: WebhookMessage):
     if not band:
         return {"status": "Bant aralığı bulunamadı"}
 
- 
-
     levels = band["levels"]
-    position_size = 100  # sabit örnek
+    position_size = 100  # Sabit örnek
 
     orders = split_position(levels, position_size, close_price, direction)
 
@@ -92,6 +89,6 @@ async def webhook_listener(data: WebhookMessage):
         "detay": orders
     }
 
-# === Uvicorn dev server için ===
+# === Uvicorn local çalıştırıcı ===
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=10000)

@@ -7,7 +7,7 @@ load_dotenv()
 
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
-TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "false"
+TESTNET = os.getenv("BYBIT_TESTNET", "false").lower() == "true"
 
 # --- Bybit oturumu oluştur ---
 session = HTTP(

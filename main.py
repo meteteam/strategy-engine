@@ -1,5 +1,6 @@
 import json
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
+from pydantic import BaseModel
 from bybit import place_limit_order
 import uvicorn
 
@@ -9,13 +10,15 @@ app = FastAPI()
 with open("bands_config.json", "r") as f:
     bands = json.load(f)
 
-# === Symbol'e özel işlem geçmişi tut ===
+# === Symbol'e özel işlem geçmişi ===
 symbol_state = {}
 
+# === Webhook mesaj yapısı ===
+class WebhookMessage(BaseModel):
+    message: str
+
+# === Ara seviyelere göre pozisyonu 2'ye böl: TP ve geri çekilme emirleri ===
 def split_position(levels: list[float], position_size: float, close_price: float, direction: str):
-    """
-    Ara seviyelere göre pozisyonu 2'ye böl: TP ve geri çekilme emirleri
-    """
     sorted_levels = sorted(levels) if direction == "long" else sorted(levels, reverse=True)
 
     tp_levels = [lvl for lvl in sorted_levels if (lvl > close_price if direction == "long" else lvl < close_price)]
@@ -26,82 +29,68 @@ def split_position(levels: list[float], position_size: float, close_price: float
         return []
 
     tp_ratio = len(tp_levels) / total_levels
-    retrace_ratio = len(retrace_levels) / total_levels
+    retrace_ratio = 1 - tp_ratio
 
     tp_amount = position_size * tp_ratio
     retrace_amount = position_size * retrace_ratio
 
-    orders = []
+    tp_share = tp_amount / len(tp_levels) if tp_levels else 0
+    retrace_share = retrace_amount / len(retrace_levels) if retrace_levels else 0
 
-    for lvl in tp_levels:
-        orders.append({
-            "side": "Sell" if direction == "long" else "Buy",
-            "price": lvl,
-            "amount": round(tp_amount / len(tp_levels), 4)
-        })
+    tp_orders = [{"price": lvl, "size": tp_share, "side": "sell" if direction == "long" else "buy"} for lvl in tp_levels]
+    retrace_orders = [{"price": lvl, "size": retrace_share, "side": "buy" if direction == "long" else "sell"} for lvl in retrace_levels]
 
-    for lvl in retrace_levels:
-        orders.append({
-            "side": "Buy" if direction == "long" else "Sell",
-            "price": lvl,
-            "amount": round(retrace_amount / len(retrace_levels), 4)
-        })
+    return tp_orders + retrace_orders
 
-    return orders
-
-
+# === Webhook listener: TradingView alarmını dinle ===
 @app.post("/webhook")
-async def webhook_listener(request: Request):
-    data = await request.json()
+async def webhook_listener(data: WebhookMessage):
+    message = data.message
+    print("📩 Gelen mesaj:", message)
 
-    symbol = data.get("symbol")
-    close_price = float(data.get("close"))
-    direction = data.get("direction")
+    # Sinyal içeriğini çöz (örnek: "🔼 LONG: Fiyat 306.0 seviyesini yukarı geçti (BINANCE:ETHUSDT.P - HA 4H)")
+    direction = "long" if "LONG" in message else "short"
+    try:
+        level_part = message.split("Fiyat")[1].split("seviyesini")[0].strip()
+        close_price = float(level_part)
+        symbol = message.split("(")[1].split(":")[1].split()[0]
+    except Exception as e:
+        return {"error": "Mesaj formatı çözülemedi", "detail": str(e)}
 
-    matched_band = next(
-        (b for b in bands if b["direction"] == direction and b["from"] < close_price < b["to"]),
-        None
-    )
+    # Sembol özel geçmişini kontrol et
+    state = symbol_state.get(symbol, {"last_band": None})
+    already_triggered = state["last_band"] == close_price
+    if already_triggered:
+        return {"info": f"{symbol} için {close_price} seviyesi zaten işlenmiş."}
 
-    if not matched_band:
-        return {"status": "no_band_match"}
+    symbol_state[symbol] = {"last_band": close_price}
 
-    state = symbol_state.get(symbol, {
-        "current_band": None,
-        "position_size": 1.0,  # İlk işlem 1 BTC gibi düşünebilirsin
-        "profit": 0.0
-    })
+    # Uygun ana bant aralığını bul
+    band = next((b for b in bands if b["direction"] == direction and b["from"] <= close_price <= b["to"]), None)
+    if not band:
+        return {"error": "Uygun band aralığı bulunamadı."}
 
-    is_new_band = matched_band != state["current_band"]
+    position_size = 100  # ← Buraya gerçek pozisyon büyüklüğünü yaz
+    orders = split_position(band["levels"], position_size, close_price, direction)
 
-    # Eğer yeni banda geçildiyse karı dahil et
-    if is_new_band:
-        state["profit"] += 0  # Kar hesabı dinamik değilse sabit bırak
-        state["position_size"] += state["profit"]
-        state["current_band"] = matched_band
-
-    # Emirleri ara seviyelere göre böl
-    orders = split_position(matched_band["levels"], state["position_size"], close_price, direction)
-
-    for o in orders:
-        print(f"Emir: {o['side']} | Fiyat: {o['price']} | Miktar: {o['amount']}")
+    # Emirleri gönder
+    for order in orders:
         place_limit_order(
             symbol=symbol,
-            side=o["side"],
-            price=o["price"],
-            qty=o["amount"]
+            side=order["side"],
+            size=order["size"],
+            price=order["price"]
         )
 
-    symbol_state[symbol] = state
-
     return {
-        "status": "executed",
+        "status": "success",
         "symbol": symbol,
-        "position_size": state["position_size"],
-        "orders": orders
+        "direction": direction,
+        "entry_price": close_price,
+        "band": band,
+        "orders_sent": len(orders)
     }
 
-
-# === Uvicorn sunucusunu başlat (Render için) ===
-if __name__ == "__main__":
+# === Lokal test için ===
+if name == "main":
     uvicorn.run("main:app", host="0.0.0.0", port=10000)

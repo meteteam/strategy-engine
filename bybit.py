@@ -26,7 +26,7 @@ def place_limit_order(symbol: str, side: str, qty: float, price: float):
             symbol=symbol,
             side=side.capitalize(),
             order_type="Limit",
-            qty=round(qty, 2)
+            qty=round(qty, 2),
             price=round(price, 2),
             time_in_force="GTC"
         )

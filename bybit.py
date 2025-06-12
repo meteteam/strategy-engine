@@ -24,14 +24,14 @@ def place_limit_order(symbol: str, side: str, qty: float, price: float):
         response = session.place_order(
             category="linear",
             symbol=symbol,
-            side=side,
+            side=side.capitalize(),
             order_type="Limit",
-            qty=qty,
-            price=price,
+            qty=round(qty, 2)
+            price=round(price, 2),
             time_in_force="GTC"
         )
-        print(f"EMİR GÖNDERİLDİ: {side} {qty} @ {price} → {symbol}")
+       print(f"✅ EMİR GÖNDERİLDİ: {side.upper()} {qty:.2f} @ {price:.2f} → {symbol}")
         return response
     except Exception as e:
-        print(f"Emir gönderilirken hata oluştu: {e}")
+        print(f"❌ Emir gönderilirken hata oluştu: {e}")
         return None

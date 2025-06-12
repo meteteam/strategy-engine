@@ -75,12 +75,7 @@ async def webhook_listener(data: WebhookMessage):
     if not band:
         return {"status": "Bant aralığı bulunamadı"}
 
-    # Daha önce aynı banttan sinyal geldiyse tekrar etme
-    key = f"{symbol}_{band['from']}_{band['to']}_{direction}"
-    if symbol_state.get(key) == close_price:
-        return {"status": "Zaten işlem yapıldı (aynı bant & fiyat)"}
-
-    symbol_state[key] = close_price  # Fiyatı sakla
+ 
 
     levels = band["levels"]
     position_size = 100  # sabit örnek

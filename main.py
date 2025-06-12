@@ -1,5 +1,5 @@
 import json
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from bybit import place_limit_order
 import uvicorn
@@ -10,14 +10,10 @@ app = FastAPI()
 with open("bands_config.json", "r") as f:
     bands = json.load(f)
 
-# === Symbol'e özel işlem geçmişi ===
+# === Symbol -> geçilen bantları tutmak için durum hafızası ===
 symbol_state = {}
 
-# === Webhook mesaj yapısı ===
-class WebhookMessage(BaseModel):
-    message: str
-
-# === Ara seviyelere göre pozisyonu 2'ye böl: TP ve geri çekilme emirleri ===
+# === Pozisyonu seviyelere böl ===
 def split_position(levels: list[float], position_size: float, close_price: float, direction: str):
     sorted_levels = sorted(levels) if direction == "long" else sorted(levels, reverse=True)
 
@@ -42,55 +38,52 @@ def split_position(levels: list[float], position_size: float, close_price: float
 
     return tp_orders + retrace_orders
 
-# === Webhook listener: TradingView alarmını dinle ===
+# === Webhook verisi için model ===
+class WebhookPayload(BaseModel):
+    message: str
+
+# === Webhook dinleyici ===
 @app.post("/webhook")
-async def webhook_listener(data: WebhookMessage):
+async def webhook_listener(data: WebhookPayload):
     message = data.message
     print("📩 Gelen mesaj:", message)
 
-    # Sinyal içeriğini çöz (örnek: "🔼 LONG: Fiyat 306.0 seviyesini yukarı geçti (BINANCE:ETHUSDT.P - HA 4H)")
+    # Yönü belirle (LONG / SHORT)
     direction = "long" if "LONG" in message else "short"
+
     try:
+        # Fiyatı ve sembolü ayıkla
         level_part = message.split("Fiyat")[1].split("seviyesini")[0].strip()
         close_price = float(level_part)
-        symbol = message.split("(")[1].split(":")[1].split()[0]
+
+        symbol = message.split("(")[1].split(":")[1].split(" ")[0]  # Örn: BINANCE:BTCUSDT.P
     except Exception as e:
-        return {"error": "Mesaj formatı çözülemedi", "detail": str(e)}
+        return {"error": "Mesaj formatı çözümlemedi", "detail": str(e)}
 
-    # Sembol özel geçmişini kontrol et
-    state = symbol_state.get(symbol, {"last_band": None})
-    already_triggered = state["last_band"] == close_price
-    if already_triggered:
-        return {"info": f"{symbol} için {close_price} seviyesi zaten işlenmiş."}
+    print(f"🎯 Symbol: {symbol} | Yön: {direction} | Kapanış: {close_price}")
 
-    symbol_state[symbol] = {"last_band": close_price}
-
-    # Uygun ana bant aralığını bul
+    # İlgili bant aralığını bul
     band = next((b for b in bands if b["direction"] == direction and b["from"] <= close_price <= b["to"]), None)
     if not band:
-        return {"error": "Uygun band aralığı bulunamadı."}
+        return {"status": "Bant aralığı bulunamadı"}
 
-    position_size = 100  # ← Buraya gerçek pozisyon büyüklüğünü yaz
-    orders = split_position(band["levels"], position_size, close_price, direction)
+    # Daha önce aynı banttan sinyal geldiyse tekrar etme
+    key = f"{symbol}_{band['from']}_{band['to']}_{direction}"
+    if symbol_state.get(key) == close_price:
+        return {"status": "Zaten işlem yapıldı (aynı bant & fiyat)"}
 
-    # Emirleri gönder
-    for order in orders:
-        place_limit_order(
-            symbol=symbol,
-            side=order["side"],
-            size=order["size"],
-            price=order["price"]
-        )
+    symbol_state[key] = close_price  # Fiyatı sakla
 
-    return {
-        "status": "success",
-        "symbol": symbol,
-        "direction": direction,
-        "entry_price": close_price,
-        "band": band,
-        "orders_sent": len(orders)
-    }
+    levels = band["levels"]
+    position_size = 100  # sabit örnek
+    orders = split_position(levels, position_size, close_price, direction)
 
-# === Lokal test için ===
+    for o in orders:
+        print(f"📦 Emir → {o}")
+        place_limit_order(symbol=symbol, side=o["side"], price=o["price"], size=o["size"])
+
+    return {"status": "İşlem tamamlandı", "adet": len(orders), "detay": orders}
+
+# === Uvicorn dev server için ===
 if name == "main":
     uvicorn.run("main:app", host="0.0.0.0", port=10000)
